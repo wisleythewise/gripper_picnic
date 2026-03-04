@@ -37,6 +37,8 @@
   input[type=range]::-moz-range-thumb{width:11px;height:11px;border-radius:50%;background:#4DA0E8;cursor:pointer;border:none}
   .ctrl-val { font-size:9px; color:#4DA0E8; margin-top:2px; text-align:right; }
   .status { position:absolute; bottom:9px; left:50%; transform:translateX(-50%); font-size:7px; color:#1A2432; letter-spacing:.22em; white-space:nowrap; }
+  .dl-btn { margin-top:6px; background:none; border:1px solid #253A52; color:#4DA0E8; font-family:'IBM Plex Mono',monospace; font-size:8px; letter-spacing:.22em; text-transform:uppercase; padding:6px 12px; cursor:pointer; transition:border-color .2s, color .2s; }
+  .dl-btn:hover { border-color:#4DA0E8; color:#7BBEF0; }
 </style>
 </head>
 <body>
@@ -66,6 +68,7 @@
       <span class="ctrl-tick right">15 mm</span>
     </div>
     <div class="ctrl-val" id="ctrl-val">ctrl: 0.0000 m</div>
+    <button class="dl-btn" id="dl-btn">↓ Export STL</button>
   </div>
   <div class="status">DRAG TO ORBIT · SCROLL TO ZOOM · TOUCH SUPPORTED</div>
 </div>
@@ -168,9 +171,66 @@ function add(parent, geo, mat, x, y, z, rx, ry, rz) {
   return m;
 }
 
-// Solid box at TJ position (px,py,pz), full dimensions w×h×d
+// Solid box — no fillets (used for thin/small parts)
 function solidBox(parent, mat, w, h, d, px, py, pz) {
   return add(parent, new THREE.BoxGeometry(w, h, d), mat, px, py, pz);
+}
+
+// Filleted box — one shrunken core + 12 edge cylinders + 8 corner spheres
+// Nothing overlaps so zero z-fighting.
+function filletBox(parent, mat, w, h, d, r, px, py, pz) {
+  const g   = new THREE.Group();
+  g.position.set(px, py, pz);
+  const hw = w/2-r, hh = h/2-r, hd = d/2-r;
+  const SEGS = 16;
+
+  function put(geo, x, y, z, rx, ry, rz) {
+    const m = new THREE.Mesh(geo, mat);
+    m.position.set(x, y, z);
+    if (rx !== undefined) m.rotation.set(rx, ry||0, rz||0);
+    m.castShadow = m.receiveShadow = true;
+    g.add(m);
+  }
+
+  // Core — shrunken so edges/corners don't overlap
+  put(new THREE.BoxGeometry(w-r*2, h-r*2, d-r*2));
+
+  // 6 face slabs (one per face, no overlaps between them or core)
+  put(new THREE.BoxGeometry(w-r*2, r*2,   d-r*2),  0,  hh+r, 0);  // top
+  put(new THREE.BoxGeometry(w-r*2, r*2,   d-r*2),  0, -hh-r, 0);  // bottom
+  put(new THREE.BoxGeometry(r*2,   h-r*2, d-r*2),  hw+r, 0, 0);   // right
+  put(new THREE.BoxGeometry(r*2,   h-r*2, d-r*2), -hw-r, 0, 0);   // left
+  put(new THREE.BoxGeometry(w-r*2, h-r*2, r*2),    0, 0,  hd+r);  // front
+  put(new THREE.BoxGeometry(w-r*2, h-r*2, r*2),    0, 0, -hd-r);  // back
+
+  // 12 edge quarter-cylinders (r128 doesn't have CylinderGeometry with thetaLength easily,
+  // so we use full cylinders placed at edge midpoints — they sit inside the face slabs,
+  // no z-fight since they're a different geometry at offset positions)
+  const cyY = new THREE.CylinderGeometry(r, r, h-r*2, SEGS);
+  const cyX = new THREE.CylinderGeometry(r, r, w-r*2, SEGS);
+  const cyZ = new THREE.CylinderGeometry(r, r, d-r*2, SEGS);
+  const eX  = new THREE.Euler(0, 0, Math.PI/2);
+  const eZ  = new THREE.Euler(Math.PI/2, 0, 0);
+
+  // 4 vertical edges (Y axis)
+  for (const [ex, ez] of [[-1,-1],[-1,1],[1,-1],[1,1]])
+    put(cyY, ex*hw, 0, ez*hd);
+  // 4 horizontal edges along X (top+bottom, front+back)
+  for (const [ey, ez] of [[-1,-1],[-1,1],[1,-1],[1,1]])
+    put(cyX, 0, ey*hh, ez*hd, 0, 0, Math.PI/2);
+  // 4 horizontal edges along Z (top+bottom, left+right)
+  for (const [ex, ey] of [[-1,-1],[-1,1],[1,-1],[1,1]])
+    put(cyZ, ex*hw, ey*hh, 0, Math.PI/2, 0, 0);
+
+  // 8 corner spheres
+  const sp = new THREE.SphereGeometry(r, SEGS, SEGS);
+  for (const [ex,ey,ez] of [
+    [-1,-1,-1],[-1,-1,1],[-1,1,-1],[-1,1,1],
+    [1,-1,-1],[1,-1,1],[1,1,-1],[1,1,1]
+  ]) put(sp, ex*hw, ey*hh, ez*hd);
+
+  parent.add(g);
+  return g;
 }
 
 // ── Hex bolt — single group, axis TJ-Y ───────────────────────────
@@ -252,7 +312,7 @@ scene.add(gripper);
 // ── Adapter neck ──────────────────────────────────────────────────
 // mj pos(0,-0.006,-0.028) size(hx=0.045,hy=0.006,hz=0.018)
 // tj pos(0,-0.028,-0.006) W=0.090 H=0.036 D=0.012
-solidBox(gripper, MAT.neck, 0.090, 0.036, 0.012,  0, -0.028, -0.006);
+filletBox(gripper, MAT.neck, 0.090, 0.036, 0.012, 0.0015, 0, -0.028, -0.006);
 
 // ── Flange disc (Ø80mm × 9mm) ────────────────────────────────────
 // mj pos(0,-0.0165,-0.028) → tj(0,-0.028,-0.0165), axis TJ-Z (mj euler 90 0 0)
@@ -279,7 +339,7 @@ for (const [mjx, mjy, mjz] of [
 // ── Sensor housing (160×56×36 mm) ────────────────────────────────
 // mj pos(0,0.028,-0.028) size(0.080,0.028,0.018)
 // tj pos(0,-0.028,0.028)  W=0.160 H=0.036 D=0.056
-solidBox(gripper, MAT.housing, 0.160, 0.036, 0.056,  0, -0.028, 0.028);
+filletBox(gripper, MAT.housing, 0.160, 0.036, 0.056, 0.0025, 0, -0.028, 0.028);
 
 // Engraved panel recess on housing front face (+TJ-Z face)
 solidBox(gripper, mkMat(0x5E6472, 0.62, 0.50), 0.090, 0.016, 0.0004,
@@ -293,7 +353,7 @@ for (const [x,z] of [[-0.065,0.012],[0.065,0.012],[-0.065,0.044],[0.065,0.044]])
 // ── Back wall (160×12×74 mm) ──────────────────────────────────────
 // mj pos(0,0.006,-0.083) size(0.080,0.006,0.037)
 // tj pos(0,-0.083,0.006)  W=0.160 H=0.074 D=0.012
-solidBox(gripper, MAT.frame, 0.160, 0.074, 0.012,  0, -0.083, 0.006);
+filletBox(gripper, MAT.frame, 0.160, 0.074, 0.012, 0.0020, 0, -0.083, 0.006);
 
 // Side-wall bolts — head proud of wall face, shank fully inside body
 // Back wall X half-width = 0.080. hShank=0.010 → group at ±(0.080-0.010)=±0.070
@@ -319,7 +379,7 @@ for (const sx of [-0.032, 0.032]) {
 // ── Lower jaw lip (160×30×5 mm) ───────────────────────────────────
 // mj pos(0,0.027,-0.118) size(0.080,0.015,0.0025)
 // tj pos(0,-0.118,0.027)  W=0.160 H=0.005 D=0.030
-solidBox(gripper, MAT.frame, 0.160, 0.005, 0.030,  0, -0.118, 0.027);
+filletBox(gripper, MAT.frame, 0.160, 0.005, 0.030, 0.0010, 0, -0.118, 0.027);
 
 // ── SLIDING TEETH ─────────────────────────────────────────────────
 //
@@ -514,6 +574,76 @@ function animate() {
   renderer.render(scene, camera);
 }
 animate();
+
+// ── STL Export ────────────────────────────────────────────────────
+document.getElementById('dl-btn').addEventListener('click', () => {
+  // Force matrix update so tooth positions from slider are correct
+  gripper.updateMatrixWorld(true);
+
+  const v0 = new THREE.Vector3(), v1 = new THREE.Vector3(), v2 = new THREE.Vector3();
+  const edge1 = new THREE.Vector3(), edge2 = new THREE.Vector3(), norm = new THREE.Vector3();
+  const tris = [];
+
+  gripper.traverse(obj => {
+    if (!obj.isMesh || !obj.geometry) return;
+
+    const geo = obj.geometry.clone();
+    // Bake world transform into vertex positions
+    geo.applyMatrix4(obj.matrixWorld);
+
+    // Convert to non-indexed so we can iterate triangles simply
+    const nonIdx = geo.index ? geo.toNonIndexed() : geo;
+    const pos = nonIdx.attributes.position;
+    const triCount = Math.floor(pos.count / 3);
+
+    for (let i = 0; i < triCount; i++) {
+      v0.fromBufferAttribute(pos, i*3);
+      v1.fromBufferAttribute(pos, i*3+1);
+      v2.fromBufferAttribute(pos, i*3+2);
+
+      edge1.subVectors(v1, v0);
+      edge2.subVectors(v2, v0);
+      norm.crossVectors(edge1, edge2).normalize();
+
+      tris.push(
+        norm.x, norm.y, norm.z,
+        v0.x, v0.y, v0.z,
+        v1.x, v1.y, v1.z,
+        v2.x, v2.y, v2.z,
+        0  // attribute byte count (uint16, stored as extra float32-aligned slot)
+      );
+    }
+
+    if (geo !== nonIdx) nonIdx.dispose();
+    geo.dispose();
+  });
+
+  // Binary STL: 80-byte header + uint32 tri count + (triCount × 50 bytes)
+  // Each triangle: 3 floats normal + 9 floats verts + 1 uint16 attr = 50 bytes
+  const triCount = Math.floor(tris.length / 13);
+  const buf  = new ArrayBuffer(80 + 4 + triCount * 50);
+  const dv   = new DataView(buf);
+  const hdr  = 'E2 Gripper - Servo7 Robotics - YC W26';
+  for (let i = 0; i < 80; i++) dv.setUint8(i, i < hdr.length ? hdr.charCodeAt(i) : 0);
+  dv.setUint32(80, triCount, true);
+
+  let off = 84;
+  for (let i = 0; i < tris.length; i++) {
+    if (i % 13 === 12) {
+      // attribute byte count — uint16
+      dv.setUint16(off, 0, true); off += 2;
+    } else {
+      dv.setFloat32(off, tris[i], true); off += 4;
+    }
+  }
+
+  const blob = new Blob([buf], { type: 'application/octet-stream' });
+  const dlA  = document.createElement('a');
+  dlA.href     = URL.createObjectURL(blob);
+  dlA.download = 'e2_gripper.stl';
+  dlA.click();
+  URL.revokeObjectURL(dlA.href);
+});
 </script>
 </body>
 </html>
